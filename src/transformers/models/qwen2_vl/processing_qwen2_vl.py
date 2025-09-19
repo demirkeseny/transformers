@@ -21,7 +21,7 @@
 Processor class for Qwen2-VL.
 """
 
-from typing import List, Union
+from typing import List, Union, Any
 
 from ...feature_extraction_utils import BatchFeature
 from ...image_utils import ImageInput, VideoInput
@@ -63,6 +63,7 @@ class Qwen2VLProcessor(ProcessorMixin):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
         self.image_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<|video_pad|>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
+        self.audio_token = "<|audio_pad|>" if not hasattr(tokenizer, "audio_token") else tokenizer.audio_token # add the audio pad
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     def __call__(
@@ -70,6 +71,7 @@ class Qwen2VLProcessor(ProcessorMixin):
         images: ImageInput = None,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
         videos: VideoInput = None,
+        audios: Any = None, # audio needs to be callable
         **kwargs: Unpack[Qwen2VLProcessorKwargs],
     ) -> BatchFeature:
         """
@@ -89,6 +91,8 @@ class Qwen2VLProcessor(ProcessorMixin):
             videos (`np.ndarray`, `torch.Tensor`, `List[np.ndarray]`, `List[torch.Tensor]`):
                 The image or batch of videos to be prepared. Each video can be a 4D NumPy array or PyTorch
                 tensor, or a nested list of 3D frames. Both channels-first and channels-last formats are supported.
+            audios (`Any`):
+                The audio or batch of audio to be prepared. Format depends on the audio processor implementation.
             return_tensors (`str` or [`~utils.TensorType`], *optional*):
                 If set, will return tensors of a particular framework. Acceptable values are:
                 - `'tf'`: Return TensorFlow `tf.constant` objects.
@@ -107,6 +111,7 @@ class Qwen2VLProcessor(ProcessorMixin):
             - **pixel_values_videos** -- Pixel values of videos to be fed to a model. Returned when `videos` is not `None`.
             - **image_grid_thw** -- List of image 3D grid in LLM. Returned when `images` is not `None`.
             - **video_grid_thw** -- List of video 3D grid in LLM. Returned when `videos` is not `None`.
+            - **audio_lengths** -- List of audio lengths. Returned when `audios` is not `None`.
         """
         output_kwargs = self._merge_kwargs(
             Qwen2VLProcessorKwargs,
@@ -114,18 +119,25 @@ class Qwen2VLProcessor(ProcessorMixin):
             **kwargs,
         )
         if images is not None:
-            image_inputs = self.image_processor(images=images, videos=None, **output_kwargs["images_kwargs"])
+            image_inputs = self.image_processor(images=images, videos=None, audios=None, **output_kwargs["images_kwargs"])
             image_grid_thw = image_inputs["image_grid_thw"]
         else:
             image_inputs = {}
             image_grid_thw = None
 
         if videos is not None:
-            videos_inputs = self.image_processor(images=None, videos=videos, **output_kwargs["videos_kwargs"])
+            videos_inputs = self.image_processor(images=None, videos=videos, audios=None, **output_kwargs["videos_kwargs"])
             video_grid_thw = videos_inputs["video_grid_thw"]
         else:
             videos_inputs = {}
             video_grid_thw = None
+
+        if audios is not None:
+            audios_inputs = self.image_processor(images=None, videos=None, audios=audios, **output_kwargs.get("audios_kwargs", {}))
+            audio_lengths = audios_inputs["audio_lengths"]
+        else:
+            audios_inputs = {}
+            audio_lengths = None
 
         if not isinstance(text, list):
             text = [text]
@@ -152,9 +164,20 @@ class Qwen2VLProcessor(ProcessorMixin):
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
 
+        if audio_lengths is not None:
+            index = 0
+            for i in range(len(text)):
+                while self.audio_token in text[i]:
+                    repeat = int(audio_lengths[index])
+                    text[i] = text[i].replace(
+                        self.audio_token, "<|placeholder|>" *repeat, 1
+                    )
+                    index += 1
+                text[i] = text[i].replace("<|placeholder|>", self.audio_token)
+
         text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
 
-        return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs})
+        return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs, **audios_inputs})
 
     def batch_decode(self, *args, **kwargs):
         """
