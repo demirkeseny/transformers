@@ -29,6 +29,8 @@ from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import logging
 
+# get fetch_audio from qwen_vl_utils's vision_process
+from qwen_vl_utils import vision_process
 
 logger = logging.get_logger(__name__)
 
@@ -133,10 +135,11 @@ class Qwen2VLProcessor(ProcessorMixin):
             video_grid_thw = None
 
         if audios is not None:
-            audios_inputs = self.image_processor(images=None, videos=None, audios=audios, **output_kwargs.get("audios_kwargs", {}))
-            audio_lengths = audios_inputs["audio_lengths"]
+            audio_data, sampling_rate = vision_process.fetch_audio(audios)
+            audio_lengths = [len(audio_data)]
         else:
-            audios_inputs = {}
+            audio_data = None
+            sampling_rate = None
             audio_lengths = None
 
         if not isinstance(text, list):
@@ -165,12 +168,14 @@ class Qwen2VLProcessor(ProcessorMixin):
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
 
         if audio_lengths is not None:
+            # For audio, we use the length directly as the number of tokens needed
             index = 0
             for i in range(len(text)):
                 while self.audio_token in text[i]:
-                    repeat = int(audio_lengths[index])
+                    # Replace audio token with placeholder tokens based on audio length
+                    num_tokens = audio_lengths[index]
                     text[i] = text[i].replace(
-                        self.audio_token, "<|placeholder|>" *repeat, 1
+                        self.audio_token, "<|placeholder|>" * num_tokens, 1
                     )
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.audio_token)
