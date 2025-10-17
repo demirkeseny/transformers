@@ -30,9 +30,9 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         n_fft=400, # fft size for mel spectrogram
         hop_length=160, # hop length for mel spectrogram
         # n_frames=3000, # number of frames for 30 seconds audio
-        conv_kernel_size=3, # kernel size for convolutional layers
-        conv_stride=2, # stride for convolutional layers
-        conv_padding=1, # padding for convolutional layers
+        # conv_kernel_size=3, # kernel size for convolutional layers
+        # conv_stride=2, # stride for convolutional layers
+        # conv_padding=1, # padding for convolutional layers
         n_mels=128, # number of mel bins
         hidden_size=512, # internal hidden size for audio projector
         proj_out=8192, # output projection size, default to Qwen2VL hidden size if None
@@ -40,10 +40,10 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         encoder_heads=8,
         d_model=1280,
         pretrained_model_name='openai/whisper-large-v3-turbo',
-        max_position_embeddings=1500, # max audio sequence length
-        token_id=None,
-        start_token_id=None,
-        end_token_id=None,
+        # max_position_embeddings=1500, # max audio sequence length
+        token_id=151657, # audio padding token id
+        start_token_id=151658, # audio start token id
+        end_token_id=151659, # audio end token id
         max_seconds=60, # max audio length in seconds to process at once
         **kwargs,
     ):
@@ -53,13 +53,13 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         self.proj_out = proj_out
         self.encoder_layers = encoder_layers
         self.encoder_heads = encoder_heads
-        self.max_position_embeddings = max_position_embeddings
+        # self.max_position_embeddings = max_position_embeddings
         self.token_id = token_id
         self.start_token_id = start_token_id
         self.end_token_id = end_token_id
-        self.conv_kernel_size = conv_kernel_size
-        self.conv_stride = conv_stride
-        self.conv_padding = conv_padding
+        # self.conv_kernel_size = conv_kernel_size
+        # self.conv_stride = conv_stride
+        # self.conv_padding = conv_padding
         self.d_model = d_model
         self.pretrained_model_name = pretrained_model_name
         self.max_seconds = max_seconds
