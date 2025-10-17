@@ -45,6 +45,7 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         start_token_id=151658, # audio start token id
         end_token_id=151659, # audio end token id
         max_seconds=60, # max audio length in seconds to process at once
+        _name_or_path="/Users/yalimdemirkesen/Desktop/LLM/speech_recognition/transformers/src/transformers/models/qwen2_vl/configuration_qwen2_vl.py",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -66,6 +67,7 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         self.sample_rate = sample_rate
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self._name_or_path = _name_or_path
 
 
 
