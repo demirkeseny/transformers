@@ -21,6 +21,53 @@ from ...utils import logging
 
 logger = logging.get_logger(__name__)
 
+class Qwen2VLAudioConfig(PretrainedConfig):
+    model_type = "qwen2_vl"
+    base_config_key = "audio_config"
+    def __init__(
+        self,
+        sample_rate=16000, # audio sample rate
+        n_fft=400, # fft size for mel spectrogram
+        hop_length=160, # hop length for mel spectrogram
+        # n_frames=3000, # number of frames for 30 seconds audio
+        conv_kernel_size=3, # kernel size for convolutional layers
+        conv_stride=2, # stride for convolutional layers
+        conv_padding=1, # padding for convolutional layers
+        n_mels=128, # number of mel bins
+        hidden_size=512, # internal hidden size for audio projector
+        proj_out=8192, # output projection size, default to Qwen2VL hidden size if None
+        encoder_layers=4,
+        encoder_heads=8,
+        d_model=1280,
+        pretrained_model_name='openai/whisper-large-v3-turbo',
+        max_position_embeddings=1500, # max audio sequence length
+        token_id=None,
+        start_token_id=None,
+        end_token_id=None,
+        max_seconds=60, # max audio length in seconds to process at once
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.n_mels = n_mels
+        self.hidden_size = hidden_size
+        self.proj_out = proj_out
+        self.encoder_layers = encoder_layers
+        self.encoder_heads = encoder_heads
+        self.max_position_embeddings = max_position_embeddings
+        self.token_id = token_id
+        self.start_token_id = start_token_id
+        self.end_token_id = end_token_id
+        self.conv_kernel_size = conv_kernel_size
+        self.conv_stride = conv_stride
+        self.conv_padding = conv_padding
+        self.d_model = d_model
+        self.pretrained_model_name = pretrained_model_name
+        self.max_seconds = max_seconds
+        self.sample_rate = sample_rate
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+
+
 
 class Qwen2VLVisionConfig(PretrainedConfig):
     model_type = "qwen2_vl"
@@ -161,7 +208,7 @@ class Qwen2VLConfig(PretrainedConfig):
     ```"""
 
     model_type = "qwen2_vl"
-    sub_configs = {"vision_config": Qwen2VLVisionConfig}
+    sub_configs = {"vision_config": Qwen2VLVisionConfig, "audio_config": Qwen2VLAudioConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -185,8 +232,20 @@ class Qwen2VLConfig(PretrainedConfig):
         attention_dropout=0.0,
         vision_config=None,
         rope_scaling=None,
+        audio_config=None,
+        use_audio=False,
         **kwargs,
     ):
+        
+        if isinstance(audio_config, dict):
+            self.audio_config = Qwen2VLAudioConfig(**audio_config)
+        elif audio_config is None:
+            self.audio_config = Qwen2VLAudioConfig()
+        self.use_audio = use_audio
+
+        if self.audio_config.proj_out is None:
+            self.audio_config.proj_out = hidden_size
+
         if isinstance(vision_config, dict):
             self.vision_config = Qwen2VLVisionConfig(**vision_config)
         elif vision_config is None:

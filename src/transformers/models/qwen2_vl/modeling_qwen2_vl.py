@@ -20,8 +20,12 @@
 """PyTorch Qwen2-VL model."""
 
 import math
+import numpy as np
+import librosa
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+from transformers import AutoModelForSpeechSeq2Seq, WhisperModel
+import librosa
 
 import torch
 import torch.nn as nn
@@ -49,7 +53,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLVisionConfig
+from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLVisionConfig, Qwen2VLAudioConfig
 
 
 if is_flash_attn_2_available():
@@ -940,7 +944,7 @@ class Qwen2VLPreTrainedModel(PreTrainedModel):
     config_class = Qwen2VLConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["Qwen2VLDecoderLayer", "Qwen2VLVisionBlock"]
+    _no_split_modules = ["Qwen2VLDecoderLayer", "Qwen2VLVisionBlock",'WhisperAudioEncoder'] # the entire decoder/vision block should be kept together, they will go together to the same GPU. 
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
     _supports_sdpa = True
@@ -949,7 +953,7 @@ class Qwen2VLPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         std = self.config.initializer_range
-        if isinstance(module, (nn.Linear, nn.Conv3d)):
+        if isinstance(module, (nn.Linear, nn.Conv3d)): # conv3d is part of qwenVL for patchification. The params will come from the checkpoint so no need to change this init, else you would need to add conv1d
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -1833,3 +1837,836 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
             }
         )
         return model_inputs
+    
+# class WhisperAudioEncoder(nn.Module):
+#     """Real Whisper encoder + projection to Qwen2VL hidden size"""
+#     def __init__(self, audio_cfg, lm_hidden_size: int):
+#         super().__init__()
+
+#         # load from config with fallback defaults
+#         self.sample_rate = getattr(audio_cfg, "sample_rate", 16000)
+#         self.n_fft = getattr(audio_cfg, "n_fft", 400)
+#         self.hop_length = getattr(audio_cfg, "hop_length", 160)
+#         self.n_mels = getattr(audio_cfg, "n_mels", 80)  # 128 mel bins for Whisper compatibility
+#         self.n_frames = getattr(audio_cfg, "n_frames", 3000)  # 30s @ 100 fps
+#         self.pretrained_model_name = getattr(audio_cfg, "pretrained_model_name", "openai/whisper-large-v3-turbo")
+#         self.max_seconds = getattr(audio_cfg, "max_seconds", 60)  # max audio length in seconds to process at once
+
+#         # Use the actual Whisper encoder
+#         wm = WhisperModel.from_pretrained(
+#             self.pretrained_model_name,  # "openai/whisper-large-v3-turbo"
+#             low_cpu_mem_usage=True,
+#             use_safetensors=True,
+#         )
+        
+#         self.whisper_encoder = wm.encoder
+
+#         d_in = self.whisper_encoder.config.d_model  # 1280 for Whisper-large-v3-turbo
+#         assert d_in == 1280, f"Expected Whisper d_model of 1280, got {d_in}"
+        
+#         # Simple projection from Whisper's d_model (1280) to Qwen2VL hidden size (8192)
+#         self.audio_projection = nn.Linear(
+#             d_in,  # Whisper-large-v3-turbo d_model
+#             lm_hidden_size,  # Qwen2VL hidden size (8192)
+#             bias=False  # because this just shifts the projected vector by a margin and neutralized with layer norm later
+#             # can be True but waste of resources, unnecessary 8192 biases.
+#         )
+        
+#         # freeze Whisper encoder weights initially, maybe unfreeze later for fine-tuning
+#         for param in self.whisper_encoder.parameters():
+#             param.requires_grad = False
+#         # add an eval statement so that dropout, layernorm etc are in eval mode
+#         self.whisper_encoder.eval()
+
+#         # cache the of the shelf positional embedding length of 1500
+#         self.register_buffer(
+#             "_pe_base", self.whisper_encoder.positional_embedding.detach().clone()
+#         )
+
+#     def _wave_length
+
+
+#     def pad_and_split(self, sr: int, audio_1d: np.ndarray, device: Optional[Union[str, torch.device]] = 'cpu', chunk_length_s: int = 30) -> torch.Tensor:
+#         """
+#         Split 1D audio array into fixed-length chunks of target_length where target_length = sr * chunk_length_s.
+#         Right-pad the last chunk with zeros. Returns (B, T) float32 on device.
+#         """
+        
+#         # Handle both 1D and 2D arrays (squeeze if needed)
+#         if audio_1d.ndim == 2 and audio_1d.shape[0] == 1:
+#             audio_1d = audio_1d.squeeze(0)
+#         elif audio_1d.ndim != 1:
+#             raise ValueError(f"expected 1D or (1,N) audio array, got {audio_1d.shape}")
+        
+#         # samples within chunk (30 sec * 16kHz = 480000 samples)
+#         target_length = int(sr * chunk_length_s)
+#         # convert to tensor and send to device
+#         x = torch.from_numpy(audio_1d).to(device=device, dtype=torch.float32)
+#         # calculate the chunk count
+#         # do ceiling division to include partial chunk
+#         # 5.1M samples with target_length = 500k -> 11 chunks
+#         chunks = (x.numel() + target_length - 1) // target_length
+#         padding = chunks * target_length - x.numel()
+#         # right pad with zeros if needed
+#         if padding:
+#             x = F.pad(x,(0,padding))
+#         return x.view(chunks, target_length) # C,t_chunk
+
+#     def convert_np_to_log_mel_spectrogram(self, sr: int,
+#                                       n_fft: int,
+#                                       hop_length: int,
+#                                       n_mels: int,
+#                                       n_frames: int,
+#                                       audio_np: np.ndarray,
+#                                       device: Optional[Union[str, torch.device]]):
+#         """
+#         Convert a 1D audio numpy array to a log mel spectrogram.
+
+#         Steps:
+#         1. Check the audio size
+#             1.1. If < 30 seconds, pad with zeros
+#             1.2. If > 30 seconds, truncate to 30 seconds and create another sample with the remaining audio
+#         2. Compute the mel spectrogram using librosa (FFT)
+#         3. Convert to log scale (dB)
+#         4. Normalize to [-1, 1]
+#         5. Ensure the spectrogram has the correct shape (80,3000)
+#         """
+
+#         # Step 1: Check audio size, create new samples if needed
+#         audios = self.pad_and_split(sr, audio_np, device).to(device) # (B,T)
+
+#         # Step 2: Compute the log mel for each chunk
+
+#         # window is to taper off the edges of each chunk to have smoother transitions across chunks
+#         # torch.hann_window(8) returns tensor([0.0000, 0.1464, 0.5000, 0.8536, 1.0000, 0.8536, 0.5000, 0.1464])
+#         # like a bell curve, high in middle, low at the edges
+#         window = torch.hann_window(n_fft).to(device)
+#         # window.shape torch.Size([400])
+
+#         # transform with Fourier (B,T) -> (B,F+1,T+1)
+
+#         stft = torch.stft(audios, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
+#         # stft.shape torch.Size([2, 201, 3001])
+
+#         # batch size of 2
+
+#         # 201 freq bins → number of unique frequency bins along the y-axis
+#         # Computed as N_FFT // 2 + 1
+#         # Why +1? Because:
+#         # - An N_FFT-point FFT produces N_FFT bins (0 … N_FFT-1), covering both + and – frequencies
+#         # - For real audio, the spectrum is Hermitian: negative frequencies are redundant
+#         # - So we keep only the non-redundant half: from 0 Hz (DC) up to Nyquist (sr/2)
+#         #   That gives N_FFT//2 + 1 bins
+#         # Example: N_FFT = 400 → 400//2 + 1 = 201 bins
+
+#         # 3001 time frames -> count of frames on the time axis (x) calculated as T // HOP_LENGTH + 1
+#         # Why +1? Because: stft is center = True by default meaning
+#         # if stride is 12, seq len is 100 and window size is 25
+#         # first window is centered at 0, so it covers -12 to +12
+#         # last window is centered at 96, so it covers 84 to 100
+#         # so we have 9 windows centered at 0,12,24,36,48,60,72,84,96
+#         # formula: T // HOP_LENGTH + 1 which makes 480000 // 160 + 1 = 3001
+
+#         magnitude = (stft.abs() ** 2)[..., :-1]
+#         # magnitude.shape torch.Size([2, 201, 3000])
+#         # we remove the last frame to make it 3000 frames
+
+#         mel_np = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=0.0, fmax=sr/2.0).astype(np.float32)
+#         mel = torch.tensor(mel_np, dtype=magnitude.dtype, device=device)
+#         # mel.shape torch.Size([80, 201])
+#         # mel represents the energy stored in that frequency bin for a specific time frame
+
+#         mel_spec = torch.einsum('mf,bft->bmt', mel, magnitude)
+#         # with batched, M,F @ B,F,T -> B,M,T
+#         # mel_spec.shape torch.Size([2, 80, 3000])
+
+#         log_mel_spec = torch.log10(torch.clamp(mel_spec, min=1e-10))
+#         max_ele = log_mel_spec.amax(dim=(-2, -1), keepdim=True) # to get the max element in each spectrogram
+
+#         # since the human ear can only capture 80 dB range, we clip the log mel spectrogram to max-8 as lower bound
+#         # 8 and not 80 because we are in log10 scale
+#         # this makes the log mel spectrogram values to be in the range of [max-8, max] where max ~ 0
+#         log_mel_spec = torch.maximum(log_mel_spec, max_ele - 8.0) 
+#         # then we normalize to [-1, 1] by dividing by 4
+#         log_mel_spec = (log_mel_spec + 4.0) / 4.0
+
+#         # Step 5: Ensure the spectrogram has the correct shape (80,3000) and not (80,3001)
+#         # if < 3000 frames, pad with zeros
+#         # if > 3000 frames, truncate to 3000 frames
+#         T = log_mel_spec.shape[-1]
+#         if T < n_frames:
+#             log_mel_spec = F.pad(log_mel_spec, (0, n_frames - T))
+#         elif T > n_frames:
+#             log_mel_spec = log_mel_spec[..., :n_frames]
+        
+#         return log_mel_spec
+    
+#     def audio_to_mel_spectrogram(self, audio: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+
+
+#         if isinstance(audio, torch.Tensor):
+#             # expect (B, T) float32/float16
+#             device = audio.device
+#             audio_np = audio.detach().float().cpu().numpy()
+#         else:
+#             device = torch.device("cpu")
+#             audio_np = audio
+
+#         # convert to log mel spectrogram
+#         log_mel_spec = self.convert_np_to_log_mel_spectrogram(
+#             sr=self.sample_rate,
+#             n_fft=self.n_fft,
+#             hop_length=self.hop_length,
+#             n_mels=self.n_mels,  # 128 for Whisper
+#             n_frames=self.n_frames,  # 30 seconds worth
+#             audio_np=audio_np,
+#             device=device
+#         )
+
+#         return log_mel_spec 
+    
+#     def forward(self, audio_input: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             audio_input: (batch_size, seq_len) - raw audio waveform
+#         Returns:
+#             Projected features: (batch_size, seq_len//4, hidden_size)
+#         """
+
+#         with torch.no_grad():
+#             mel = self.audio_to_mel_spectrogram(audio_input)
+#             enc_out = self.whisper_encoder(mel)
+
+#         audio_features = enc_out.last_hidden_state  # (batch, n_frames//4, 1280)
+#         proj = self.audio_projection(audio_features)  # (batch, n_frames//4, 8192)
+#         return proj
+    
+class WhisperAudioEncoder(nn.Module):
+    """Real Whisper encoder + projection to Qwen2VL hidden size"""
+    def __init__(self, audio_cfg, lm_hidden_size: int):
+        super().__init__()
+
+        # load from config with fallback defaults
+        self.sample_rate = getattr(audio_cfg, "sample_rate", 16000)
+        self.n_fft = getattr(audio_cfg, "n_fft", 400)
+        self.hop_length = getattr(audio_cfg, "hop_length", 160)
+        self.n_mels = getattr(audio_cfg, "n_mels", 80)  # 128 mel bins for Whisper compatibility
+        # self.n_frames = getattr(audio_cfg, "n_frames", 3000)  # 30s @ 100 fps
+        self.pretrained_model_name = getattr(audio_cfg, "pretrained_model_name", "openai/whisper-large-v3-turbo")
+        self.max_seconds = getattr(audio_cfg, "max_seconds", 60)  # max audio length in seconds to process at once
+
+        # Use the actual Whisper encoder
+        wm = WhisperModel.from_pretrained(
+            self.pretrained_model_name,  # "openai/whisper-large-v3-turbo"
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+        )
+        
+        self.whisper_encoder = wm.encoder
+
+        d_in = self.whisper_encoder.config.d_model  # 1280 for Whisper-large-v3-turbo
+        assert d_in == 1280, f"Expected Whisper d_model of 1280, got {d_in}"
+        
+        # Simple projection from Whisper's d_model (1280) to Qwen2VL hidden size (8192)
+        self.audio_projection = nn.Linear(
+            d_in,  # Whisper-large-v3-turbo d_model
+            lm_hidden_size,  # Qwen2VL hidden size (8192)
+            bias=False  # because this just shifts the projected vector by a margin and neutralized with layer norm later
+            # can be True but waste of resources, unnecessary 8192 biases.
+        )
+        
+        # freeze Whisper encoder weights initially, maybe unfreeze later for fine-tuning
+        for param in self.whisper_encoder.parameters():
+            param.requires_grad = False
+        # add an eval statement so that dropout, layernorm etc are in eval mode
+        self.whisper_encoder.eval()
+
+        # cache the of the shelf positional embedding length of 1500
+        # self.register_buffer(
+        #     "_pe_base", self.whisper_encoder.embed_positions.weight.detach().clone()
+        # )
+
+    def _wave_to_logmel(self,audio_np: np.ndarray, device: Optional[Union[str, torch.device]]):
+        """
+        Convert a 1D audio numpy array to a log mel spectrogram where T_mel is dynamic.
+        No 30 sec clamp or chunking. Just the optional hard cap at 60 sec. 
+        """
+
+        # if there is a limit like 60 sec, truncate the audio_np
+        if self.max_seconds is not None:
+            max_len = int(self.max_seconds * self.sample_rate)
+            if audio_np.shape[0] > max_len:
+                audio_np = audio_np[:max_len]
+
+        x = torch.from_numpy(audio_np).to(device=device, dtype=torch.float32).unsqueeze(0) # (1,T)
+        window = torch.hann_window(self.n_fft).to(device)
+        stft = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, window=window, return_complex=True)
+        magnitude = (stft.abs() ** 2)[..., :-1] # (1,F,T)
+
+        mel_np = librosa.filters.mel(
+            sr=self.sample_rate, n_fft=self.n_fft,
+            n_mels=self.n_mels, fmin=0.0, fmax=self.sample_rate / 2.0
+        ).astype(np.float32)
+        mel = torch.tensor(mel_np, dtype=magnitude.dtype, device=device)  # (M, F)
+
+        mel_spec = torch.einsum('mf,bft->bmt', mel, magnitude)  # (1, M, T_mel)
+
+        # log compression + clamp to ~80 dB dynamic range, then map near [-1,1]
+        log_mel = torch.log10(torch.clamp(mel_spec, min=1e-10))
+        max_ele = log_mel.amax(dim=(-2, -1), keepdim=True)
+        log_mel = torch.maximum(log_mel, max_ele - 8.0)
+        log_mel = (log_mel + 4.0) / 4.0
+
+        # make T_mel even by right-padding ONE zero frame if needed (keep content)
+        if (log_mel.size(-1) & 1) == 1:
+            log_mel = F.pad(log_mel, (0, 1), value=0.0)
+
+        return log_mel  # (1, n_mels, T_mel_even)
+
+    def audio_to_mel_spectrogram(self, audio: torch.Tensor | np.ndarray) -> torch.Tensor:
+        "This is just to ensure the input is 1D numpy array. If so, call _wave_to_logmel"
+        if isinstance(audio, torch.Tensor):
+            device = audio.device
+            audio_np = audio.detach().float().cpu().numpy()
+            if audio_np.ndim == 2 and audio_np.shape[0] == 1:
+                audio_np = audio_np.squeeze(0)
+        else:
+            device = torch.device("cpu")
+            audio_np = audio
+        assert audio_np.ndim == 1, f"expected mono waveform 1D, got {audio_np.shape}"
+        return self._wave_to_logmel(audio_np, device)  # (1, n_mels, T_mel_even)
+    
+    def _resize_pe(self, pe: torch.Tensor, target_L: int) -> torch.Tensor:
+        """
+        Resize positional encodings to the target length.
+        Args:
+            pe (`torch.FloatTensor`): The original positional encodings of shape (original_L, D).
+            target_L (`int`): The target length for the positional encodings.
+        Returns:
+            `torch.FloatTensor`: The resized positional encodings of shape (target_L, D).
+        """
+        original_L, d_model = pe.shape
+
+        if target_L > original_L: # interpolate
+            # convert from L,D to 1,D,L for interpolate on L dimension
+            pe = pe.transpose(0, 1).unsqueeze(0)
+            out = F.interpolate(
+                pe, size=target_L, mode='linear',align_corners=False
+            )
+            out = out.squeeze(0).transpose(0, 1)  # back to L,D
+
+        else: # slice
+            out = pe[:target_L, :]
+
+        return out
+
+    @torch.no_grad()
+    def forward(self, audio_input: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            audio_input: (B,T) torch waveform on device, or 1D numpy waveform.
+        Returns:
+            (B, L_enc, lm_hidden_size) where L_enc = T_mel // 2
+        """
+        # Build mel per sample (no batch padding)
+        if isinstance(audio_input, torch.Tensor):
+            if audio_input.dim() == 1:
+                audio_input = audio_input.unsqueeze(0)
+            B = audio_input.size(0)
+            device = audio_input.device
+            mels = [self.audio_to_mel_spectrogram(audio_input[b]) for b in range(B)]
+            mel = torch.cat(mels, dim=0).to(device)  # (B, n_mels, T_mel_even)
+        else:
+            mel = self.audio_to_mel_spectrogram(audio_input)  # (1, n_mels, T_mel_even)
+            
+
+        # T_mel = mel.size(-1)
+        # L_enc = T_mel // 2
+
+        # # Resize learned PE to L_enc (slice if < base_len, interpolate if > base_len)
+        # base_pe = self._pe_base.to(device, dtype=self.whisper_encoder.embed_positions.weight.dtype)
+        # pe_target = self._resize_pe(base_pe, L_enc)
+
+        # # Temporarily swap PE, run encoder, restore PE
+        # orig_pe = self.whisper_encoder.embed_positions.weight
+        # try:
+        #     self.whisper_encoder.embed_positions.weight = nn.Parameter(pe_target, requires_grad=False)
+        #     enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, L_enc, 1280))
+        # finally:
+        #     self.whisper_encoder.embed_positions.weight = orig_pe
+
+        enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, L_enc, 1280))
+
+        feats = enc_out.last_hidden_state            # (B, L_enc, 1280)
+        proj = self.audio_projection(feats)          # (B, L_enc, lm_hidden_size)
+        return proj
+
+class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, GenerationMixin):
+    _tied_weights_keys = ["lm_head.weight"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.visual = Qwen2VisionTransformerPretrainedModel._from_config(config.vision_config)
+        
+        # Initialize audio components if audio is enabled
+        if config.use_audio:
+            self.audio_module = WhisperAudioEncoder(config.audio_config, lm_hidden_size=config.hidden_size) # encoder and projector
+        
+        self.model = Qwen2VLModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.rope_deltas = None  # cache rope_deltas here
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.model = decoder
+
+    def get_decoder(self):
+        return self.model
+
+    def get_rope_index(
+        self,
+        input_ids: torch.LongTensor,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Calculate the 3D rope index based on image and video's temporal, height and width in LLM.
+
+        Explanation:
+            Each embedding sequence contains vision embedding and text embedding or just contains text embedding.
+
+            For pure text embedding sequence, the rotary position embedding has no difference with mordern LLMs.
+            Examples:
+                input_ids: [T T T T T], here T is for text.
+                temporal position_ids: [0, 1, 2, 3, 4]
+                height position_ids: [0, 1, 2, 3, 4]
+                width position_ids: [0, 1, 2, 3, 4]
+
+            For vision and text embedding sequence, we calculate 3D rotary position embedding for vision part
+            and 1D rotary position embeddin for text part.
+            Examples:
+                Assume we have a video input with 3 temporal patches, 2 height patches and 2 width patches.
+                input_ids: [V V V V V V V V V V V V T T T T T], here V is for vision.
+                vision temporal position_ids: [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+                vision height position_ids: [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1]
+                vision width position_ids: [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+                text temporal position_ids: [3, 4, 5, 6, 7]
+                text height position_ids: [3, 4, 5, 6, 7]
+                text width position_ids: [3, 4, 5, 6, 7]
+                Here we calculate the text start position_ids as the max vision position_ids plus 1.
+
+        Args:
+            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
+                it.
+            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+                The temporal, height and width of feature shape of each image in LLM.
+            video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+                The temporal, height and width of feature shape of each video in LLM.
+            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+
+                - 1 for tokens that are **not masked**,
+                - 0 for tokens that are **masked**.
+
+        Returns:
+            position_ids (`torch.LongTensor` of shape `(3, batch_size, sequence_length)`)
+            mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
+        """
+        spatial_merge_size = self.config.vision_config.spatial_merge_size
+        image_token_id = self.config.image_token_id
+        video_token_id = self.config.video_token_id
+        vision_start_token_id = self.config.vision_start_token_id
+        mrope_position_deltas = []
+        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
+            total_input_ids = input_ids
+            if attention_mask is None:
+                attention_mask = torch.ones_like(total_input_ids)
+            position_ids = torch.ones(
+                3, input_ids.shape[0], input_ids.shape[1], dtype=input_ids.dtype, device=input_ids.device
+            )
+            image_index, video_index = 0, 0
+            for i, input_ids in enumerate(total_input_ids):
+                input_ids = input_ids[attention_mask[i] == 1]
+                image_nums, video_nums = 0, 0
+                vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
+                vision_tokens = input_ids[vision_start_indices + 1]
+                image_nums = (vision_tokens == image_token_id).sum()
+                video_nums = (vision_tokens == video_token_id).sum()
+                input_tokens = input_ids.tolist()
+                llm_pos_ids_list: list = []
+                st = 0
+                remain_images, remain_videos = image_nums, video_nums
+                for _ in range(image_nums + video_nums):
+                    if image_token_id in input_tokens and remain_images > 0:
+                        ed_image = input_tokens.index(image_token_id, st)
+                    else:
+                        ed_image = len(input_tokens) + 1
+                    if video_token_id in input_tokens and remain_videos > 0:
+                        ed_video = input_tokens.index(video_token_id, st)
+                    else:
+                        ed_video = len(input_tokens) + 1
+                    if ed_image < ed_video:
+                        t, h, w = (
+                            image_grid_thw[image_index][0],
+                            image_grid_thw[image_index][1],
+                            image_grid_thw[image_index][2],
+                        )
+                        image_index += 1
+                        remain_images -= 1
+                        ed = ed_image
+                    else:
+                        t, h, w = (
+                            video_grid_thw[video_index][0],
+                            video_grid_thw[video_index][1],
+                            video_grid_thw[video_index][2],
+                        )
+                        video_index += 1
+                        remain_videos -= 1
+                        ed = ed_video
+                    llm_grid_t, llm_grid_h, llm_grid_w = (
+                        t.item(),
+                        h.item() // spatial_merge_size,
+                        w.item() // spatial_merge_size,
+                    )
+                    text_len = ed - st
+
+                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
+                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+                if st < len(input_tokens):
+                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    text_len = len(input_tokens) - st
+                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+                llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
+                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
+            mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
+            return position_ids, mrope_position_deltas
+        else:
+            if attention_mask is not None:
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(input_ids.device)
+                max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
+                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
+            else:
+                position_ids = (
+                    torch.arange(input_ids.shape[1], device=input_ids.device)
+                    .view(1, 1, -1)
+                    .expand(3, input_ids.shape[0], -1)
+                )
+                mrope_position_deltas = torch.zeros(
+                    [input_ids.shape[0], 1],
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+
+            return position_ids, mrope_position_deltas
+
+    @add_start_docstrings_to_model_forward(QWEN2_VL_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Qwen2VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        audio_values: Optional[torch.FloatTensor] = None,
+        audio_length: Optional[torch.LongTensor] = None,
+        rope_deltas: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, Qwen2VLCausalLMOutputWithPast]:
+        r"""
+        Args:
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+            audio_values (`torch.FloatTensor` of shape `(batch_size, n_mels, sequence_length)`, *optional*):
+                Raw audio input values (mel spectrograms).
+            audio_length (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+                Length of each audio sequence.
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from PIL import Image
+        >>> import requests
+        >>> from transformers import AutoProcessor, Qwen2VLForConditionalGenerationWithAudio
+
+        >>> model = Qwen2VLForConditionalGenerationWithAudio.from_pretrained("your-audio-model")
+        >>> processor = AutoProcessor.from_pretrained("your-audio-model")
+
+        >>> messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "audio"},
+                    {"type": "text", "text": "What is said in this audio?"},
+                ],
+            },
+        ]
+        >>> audio_data = ... # Your audio data
+        >>> text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        >>> inputs = processor(text=[text], audios=[audio_data])
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "The audio contains speech saying: ..."
+        ```"""
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if inputs_embeds is None:
+            inputs_embeds = self.model.embed_tokens(input_ids)
+            
+            # Handle vision inputs (images)
+            if pixel_values is not None:
+                pixel_values = pixel_values.type(self.visual.get_dtype())
+                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
+                n_image_features = image_embeds.shape[0]
+                if n_image_tokens != n_image_features:
+                    raise ValueError(
+                        f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+                    )
+                image_mask = (
+                    (input_ids == self.config.image_token_id)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            # Handle vision inputs (videos)
+            if pixel_values_videos is not None:
+                pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
+                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+                n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
+                n_video_features = video_embeds.shape[0]
+                if n_video_tokens != n_video_features:
+                    raise ValueError(
+                        f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                    )
+                video_mask = (
+                    (input_ids == self.config.video_token_id)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            # Handle audio inputs
+            if (audio_values is not None) and getattr(self.config, "use_audio", False):
+                # audio_values must be (B, T) raw waveform
+                # audio_embs = self.audio_module(audio_values.to(inputs_embeds.device, dtype=inputs_embeds.dtype))
+                audio_embs = self.audio_module(audio_values)
+                audio_embs = audio_embs.to(inputs_embeds.device, dtype=inputs_embeds.dtype)
+                # audio token id
+                audio_tok = getattr(self.config.audio_config, "token_id", None) or getattr(self.config, "audio_token_id", None)
+                if audio_tok is None:
+                    raise ValueError("audio token id not set in config.audio_config.token_id or config.audio_token_id")
+
+                # Per-sample splice at <|audio_pad|> positions
+                audio_mask_bool = (input_ids == audio_tok)  # (B, L)
+                B, L = audio_mask_bool.shape
+                H = inputs_embeds.size(-1)
+                # Sanity: T' must equal count of <|audio_pad|> for each sample
+                T_prime = audio_embs.size(1)
+                counts = audio_mask_bool.sum(dim=1)  # (B,)
+                if not torch.all(counts == T_prime):
+                    raise ValueError(f"Mismatch between audio steps ({T_prime}) and <|audio_pad|> counts {counts.tolist()}")
+
+                # Build buffer and fill by batch
+                buf = inputs_embeds.new_zeros(B, L, H)
+                for b in range(B):
+                    idx = audio_mask_bool[b].nonzero(as_tuple=False).squeeze(1)   # (T',)
+                    buf[b, idx, :] = audio_embs[b]                                # (T', H)
+                inputs_embeds = torch.where(audio_mask_bool.unsqueeze(-1), buf, inputs_embeds)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(inputs_embeds.device)
+
+        # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
+        if position_ids is None and input_ids is not None and (attention_mask is None or attention_mask.ndim == 2):
+            # calculate RoPE index once per generation in the pre-fill stage only
+            if (cache_position is not None and cache_position[0] == 0) or self.rope_deltas is None:
+                position_ids, rope_deltas = self.get_rope_index(
+                                input_ids, image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw, attention_mask=attention_mask
+                            )
+                self.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        outputs = self.model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return Qwen2VLCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=self.rope_deltas,
+        )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        audio_values=None,
+        audio_length=None,
+        **kwargs,
+    ):
+        # Overwritten -- in specific circumstances we don't want to forward inputs to the model
+
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        if past_key_values is not None:
+            if inputs_embeds is not None:  # Exception 1
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
+
+        if cache_position[0] != 0:
+            pixel_values = None
+            pixel_values_videos = None
+            audio_values = None
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and cache_position[0] == 0:
+            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
+        else:
+            model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
+
+        if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
+            if model_inputs["inputs_embeds"] is not None:
+                batch_size, sequence_length, _ = inputs_embeds.shape
+                device = inputs_embeds.device
+            else:
+                batch_size, sequence_length = input_ids.shape
+                device = input_ids.device
+
+            attention_mask = self.model._prepare_4d_causal_attention_mask_with_cache_position(
+                attention_mask,
+                sequence_length=sequence_length,
+                target_length=past_key_values.get_max_cache_shape(),
+                dtype=self.lm_head.weight.dtype,
+                device=device,
+                cache_position=cache_position,
+                batch_size=batch_size,
+                config=self.config,
+                past_key_values=past_key_values,
+            )
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+                "pixel_values": pixel_values,
+                "pixel_values_videos": pixel_values_videos,
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+                "audio_values": audio_values,
+                "audio_length": audio_length,
+                "cache_position": cache_position,
+            }
+        )
+        return model_inputs
+
+

@@ -17,7 +17,7 @@ from ...utils import OptionalDependencyNotAvailable, _LazyModule, is_torch_avail
 
 
 _import_structure = {
-    "configuration_qwen2_vl": ["Qwen2VLConfig"],
+    "configuration_qwen2_vl": ["Qwen2VLConfig", "Qwen2VLAudioConfig", "Qwen2VLVisionConfig"],
     "processing_qwen2_vl": ["Qwen2VLProcessor"],
 }
 
@@ -30,8 +30,10 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["modeling_qwen2_vl"] = [
         "Qwen2VLForConditionalGeneration",
+        "Qwen2VLForConditionalGenerationWithAudio",
         "Qwen2VLModel",
         "Qwen2VLPreTrainedModel",
+        "WhisperLikeAudioProjection",
     ]
 
 try:
@@ -44,7 +46,7 @@ else:
 
 
 if TYPE_CHECKING:
-    from .configuration_qwen2_vl import Qwen2VLConfig
+    from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLAudioConfig, Qwen2VLVisionConfig
     from .processing_qwen2_vl import Qwen2VLProcessor
 
     try:
@@ -55,8 +57,10 @@ if TYPE_CHECKING:
     else:
         from .modeling_qwen2_vl import (
             Qwen2VLForConditionalGeneration,
+            Qwen2VLForConditionalGenerationWithAudio,
             Qwen2VLModel,
             Qwen2VLPreTrainedModel,
+            WhisperLikeAudioProjection,
         )
 
     try:

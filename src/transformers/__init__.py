@@ -693,6 +693,7 @@ _import_structure = {
     ],
     "models.qwen2_moe": ["Qwen2MoeConfig"],
     "models.qwen2_vl": [
+        "Qwen2VLAudioConfig",
         "Qwen2VLConfig",
         "Qwen2VLProcessor",
     ],
@@ -3173,6 +3174,7 @@ else:
     _import_structure["models.qwen2_vl"].extend(
         [
             "Qwen2VLForConditionalGeneration",
+            "Qwen2VLForConditionalGenerationWithAudio",
             "Qwen2VLModel",
             "Qwen2VLPreTrainedModel",
         ]
@@ -5611,6 +5613,7 @@ if TYPE_CHECKING:
     )
     from .models.qwen2_moe import Qwen2MoeConfig
     from .models.qwen2_vl import (
+        Qwen2VLAudioConfig,
         Qwen2VLConfig,
         Qwen2VLProcessor,
     )
@@ -7738,6 +7741,7 @@ if TYPE_CHECKING:
         )
         from .models.qwen2_vl import (
             Qwen2VLForConditionalGeneration,
+            Qwen2VLForConditionalGenerationWithAudio,
             Qwen2VLModel,
             Qwen2VLPreTrainedModel,
         )
