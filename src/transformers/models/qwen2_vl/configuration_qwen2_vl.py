@@ -41,8 +41,8 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         d_model=1280,
         pretrained_model_name='openai/whisper-large-v3-turbo',
         # max_position_embeddings=1500, # max audio sequence length
-        token_id=151657, # audio padding token id
-        start_token_id=151658, # audio start token id
+        token_id=151658, # audio padding token id
+        start_token_id=151657, # audio start token id
         end_token_id=151659, # audio end token id
         max_seconds=60, # max audio length in seconds to process at once
         _name_or_path="/Users/yalimdemirkesen/Desktop/LLM/speech_recognition/transformers/src/transformers/models/qwen2_vl/configuration_qwen2_vl.py",
