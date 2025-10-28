@@ -2043,7 +2043,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
     
 class WhisperAudioEncoder(nn.Module):
     """Real Whisper encoder + projection to Qwen2VL hidden size"""
-    def __init__(self, audio_cfg, lm_hidden_size: int):
+    def __init__(self, audio_cfg):
         super().__init__()
 
         # load from config with fallback defaults
@@ -2054,6 +2054,7 @@ class WhisperAudioEncoder(nn.Module):
         # self.n_frames = getattr(audio_cfg, "n_frames", 3000)  # 30s @ 100 fps
         self.pretrained_model_name = getattr(audio_cfg, "pretrained_model_name", "openai/whisper-large-v3-turbo")
         self.max_seconds = getattr(audio_cfg, "max_seconds", 60)  # max audio length in seconds to process at once
+        self.lm_hidden_size = getattr(audio_cfg, "proj_out", 3584)
 
         # Use the actual Whisper encoder
         wm = WhisperModel.from_pretrained(
@@ -2070,7 +2071,7 @@ class WhisperAudioEncoder(nn.Module):
         # Simple projection from Whisper's d_model (1280) to Qwen2VL hidden size (8192)
         self.audio_projection = nn.Linear(
             d_in,  # Whisper-large-v3-turbo d_model
-            lm_hidden_size,  # Qwen2VL hidden size (8192)
+            self.lm_hidden_size,  # Qwen2VL hidden size (8192)
             bias=False  # because this just shifts the projected vector by a margin and neutralized with layer norm later
             # can be True but waste of resources, unnecessary 8192 biases.
         )
@@ -2099,17 +2100,17 @@ class WhisperAudioEncoder(nn.Module):
                 audio_np = audio_np[:max_len]
 
         x = torch.from_numpy(audio_np).to(device=device, dtype=torch.float32).unsqueeze(0) # (1,T)
-        window = torch.hann_window(self.n_fft).to(device)
-        stft = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, window=window, return_complex=True)
-        magnitude = (stft.abs() ** 2)[..., :-1] # (1,F,T)
+        window = torch.hann_window(self.n_fft).to(device) #400 point Hann window
+        stft = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop_length, window=window, return_complex=True) # (1,201,1712)
+        magnitude = (stft.abs() ** 2)[..., :-1] # (1,F,T) same as (1,201,1712)
 
         mel_np = librosa.filters.mel(
             sr=self.sample_rate, n_fft=self.n_fft,
             n_mels=self.n_mels, fmin=0.0, fmax=self.sample_rate / 2.0
-        ).astype(np.float32)
-        mel = torch.tensor(mel_np, dtype=magnitude.dtype, device=device)  # (M, F)
+        ).astype(np.float32) #(128,201) because self.n_mels = 128
+        mel = torch.tensor(mel_np, dtype=magnitude.dtype, device=device)  # (M, F) same as (128,201)
 
-        mel_spec = torch.einsum('mf,bft->bmt', mel, magnitude)  # (1, M, T_mel)
+        mel_spec = torch.einsum('mf,bft->bmt', mel, magnitude)  # (128,201) @ (1,201,1712) -> (1,128,1712)
 
         # log compression + clamp to ~80 dB dynamic range, then map near [-1,1]
         log_mel = torch.log10(torch.clamp(mel_spec, min=1e-10))
@@ -2117,8 +2118,8 @@ class WhisperAudioEncoder(nn.Module):
         log_mel = torch.maximum(log_mel, max_ele - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
 
-        # make T_mel even by right-padding ONE zero frame if needed (keep content)
-        if (log_mel.size(-1) & 1) == 1:
+        # make T_mel even by right-padding ONE zero frame if needed 
+        if (log_mel.size(-1) & 1) == 1: # 1 if odd, 0 if even
             log_mel = F.pad(log_mel, (0, 1), value=0.0)
 
         return log_mel  # (1, n_mels, T_mel_even)
@@ -2168,6 +2169,7 @@ class WhisperAudioEncoder(nn.Module):
         Returns:
             (B, L_enc, lm_hidden_size) where L_enc = T_mel // 2
         """
+        # import pdb; pdb.set_trace()
         # Build mel per sample (no batch padding)
         if isinstance(audio_input, torch.Tensor):
             if audio_input.dim() == 1:
@@ -2178,27 +2180,11 @@ class WhisperAudioEncoder(nn.Module):
             mel = torch.cat(mels, dim=0).to(device)  # (B, n_mels, T_mel_even)
         else:
             mel = self.audio_to_mel_spectrogram(audio_input)  # (1, n_mels, T_mel_even)
-            
 
-        # T_mel = mel.size(-1)
-        # L_enc = T_mel // 2
+        enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, 856, 1280)) where 856 is the number of input tokens.
 
-        # # Resize learned PE to L_enc (slice if < base_len, interpolate if > base_len)
-        # base_pe = self._pe_base.to(device, dtype=self.whisper_encoder.embed_positions.weight.dtype)
-        # pe_target = self._resize_pe(base_pe, L_enc)
-
-        # # Temporarily swap PE, run encoder, restore PE
-        # orig_pe = self.whisper_encoder.embed_positions.weight
-        # try:
-        #     self.whisper_encoder.embed_positions.weight = nn.Parameter(pe_target, requires_grad=False)
-        #     enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, L_enc, 1280))
-        # finally:
-        #     self.whisper_encoder.embed_positions.weight = orig_pe
-
-        enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, L_enc, 1280))
-
-        feats = enc_out.last_hidden_state            # (B, L_enc, 1280)
-        proj = self.audio_projection(feats)          # (B, L_enc, lm_hidden_size)
+        feats = enc_out.last_hidden_state            # (B, 856, 1280)
+        proj = self.audio_projection(feats)          # (B, 856, 8194) where 8194 is the output projection size.
         return proj
 
 class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, GenerationMixin):
@@ -2210,7 +2196,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         
         # Initialize audio components if audio is enabled
         if config.use_audio:
-            self.audio_module = WhisperAudioEncoder(config.audio_config, lm_hidden_size=config.hidden_size) # encoder and projector
+            self.audio_module = WhisperAudioEncoder(config.audio_config) # encoder and projector
         
         self.model = Qwen2VLModel(config)
         self.vocab_size = config.vocab_size
@@ -2500,32 +2486,42 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
             # Handle audio inputs
+            # import pdb; pdb.set_trace()
             if (audio_values is not None) and getattr(self.config, "use_audio", False):
-                # audio_values must be (B, T) raw waveform
-                # audio_embs = self.audio_module(audio_values.to(inputs_embeds.device, dtype=inputs_embeds.dtype))
-                audio_embs = self.audio_module(audio_values)
+                # audio_values must be (B, T) raw waveform: torch.Size([1, 273920])
+                audio_embs = self.audio_module(audio_values) 
+                # audio_embs is torch.Size([1, 856, 3584]) where 3584 is d_model and 856 is the number of input tokens.
+                # int(batch["number_encoder_tokens"].item()) returns 856
                 audio_embs = audio_embs.to(inputs_embeds.device, dtype=inputs_embeds.dtype)
-                # audio token id
+                # audio token id 151658
                 audio_tok = getattr(self.config.audio_config, "token_id", None) or getattr(self.config, "audio_token_id", None)
                 if audio_tok is None:
                     raise ValueError("audio token id not set in config.audio_config.token_id or config.audio_token_id")
 
                 # Per-sample splice at <|audio_pad|> positions
                 audio_mask_bool = (input_ids == audio_tok)  # (B, L)
-                B, L = audio_mask_bool.shape
-                H = inputs_embeds.size(-1)
+                B, L = audio_mask_bool.shape # 1,902
+                H = inputs_embeds.size(-1) #3584
                 # Sanity: T' must equal count of <|audio_pad|> for each sample
                 T_prime = audio_embs.size(1)
                 counts = audio_mask_bool.sum(dim=1)  # (B,)
                 if not torch.all(counts == T_prime):
                     raise ValueError(f"Mismatch between audio steps ({T_prime}) and <|audio_pad|> counts {counts.tolist()}")
+                    
+                # TODO: Now replace the placeholders with the audio embeddings
+                
+                # a buffer of zeros with the same shape as the inputs_embeds
+                buffer = inputs_embeds.new_zeros(B, L, H) # (1,902,3584)
+                for b in range(B): # for each batch
+                    # find the idx where there are audio_pad tokens
+                    idx = audio_mask_bool[b].nonzero(as_tuple=False).squeeze(1) # (T',) -> (856,)
+                    # replace the buffer with the audio embeddings
+                    buffer[b, idx, :] = audio_embs[b] # (1,856,3584)
 
-                # Build buffer and fill by batch
-                buf = inputs_embeds.new_zeros(B, L, H)
-                for b in range(B):
-                    idx = audio_mask_bool[b].nonzero(as_tuple=False).squeeze(1)   # (T',)
-                    buf[b, idx, :] = audio_embs[b]                                # (T', H)
-                inputs_embeds = torch.where(audio_mask_bool.unsqueeze(-1), buf, inputs_embeds)
+                # replace with the buffer where there is audio_pad tokens, else keep the original embeddings
+                inputs_embeds = torch.where(audio_mask_bool.unsqueeze(-1), buffer, inputs_embeds)
+
+
 
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)

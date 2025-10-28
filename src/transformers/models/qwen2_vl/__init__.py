@@ -33,7 +33,6 @@ else:
         "Qwen2VLForConditionalGenerationWithAudio",
         "Qwen2VLModel",
         "Qwen2VLPreTrainedModel",
-        "WhisperLikeAudioProjection",
     ]
 
 try:
@@ -60,7 +59,6 @@ if TYPE_CHECKING:
             Qwen2VLForConditionalGenerationWithAudio,
             Qwen2VLModel,
             Qwen2VLPreTrainedModel,
-            WhisperLikeAudioProjection,
         )
 
     try:

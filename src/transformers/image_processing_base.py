@@ -546,6 +546,10 @@ class ImageProcessingMixin(PushToHubMixin):
             response = requests.get(image_url_or_urls, stream=True, headers=headers)
             response.raise_for_status()
             return Image.open(BytesIO(response.content))
+        elif isinstance(image_url_or_urls, Image.Image):
+            return image_url_or_urls.convert("RGB")
+        elif isinstance(image_url_or_urls, (torch.Tensor, np.ndarray)):
+            return image_url_or_urls
         else:
             raise TypeError(f"only a single or a list of entries is supported but got type={type(image_url_or_urls)}")
 

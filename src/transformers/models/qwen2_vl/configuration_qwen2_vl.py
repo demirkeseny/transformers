@@ -35,7 +35,7 @@ class Qwen2VLAudioConfig(PretrainedConfig):
         # conv_padding=1, # padding for convolutional layers
         n_mels=128, # number of mel bins
         hidden_size=512, # internal hidden size for audio projector
-        proj_out=8192, # output projection size, default to Qwen2VL hidden size if None
+        proj_out=3584, # output projection size, default to Qwen2VL hidden size if None
         encoder_layers=4,
         encoder_heads=8,
         d_model=1280,
@@ -216,7 +216,7 @@ class Qwen2VLConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=152064,
-        hidden_size=8192,
+        hidden_size=3584,
         intermediate_size=29568,
         num_hidden_layers=80,
         num_attention_heads=64,

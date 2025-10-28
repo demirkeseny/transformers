@@ -149,22 +149,25 @@ class Qwen2VLProcessor(ProcessorMixin):
             video_grid_thw = None
 
         if audios is not None:
+            # import pdb; pdb.set_trace()
             # calculate the length of the audio
             audio_length = audios.shape[0] / audio_sample_rate
-            # number_encoder_tokens = 1500 * int(math.ceil(audio_length / 30.0)) # each 30 seconds of audio will create a new sample
+            # x100 because there are 100 mel frames per second for whisper with 16kHz sample rate and 160 hop length
             number_mel_frames = np.floor(audio_length * 100)
             if number_mel_frames % 2 != 0:
                 number_mel_frames += 1
+            # divide by 2 because each mel frame is 2 tokens due to one of Conv1d having stride=2
             number_encoder_tokens = int(number_mel_frames // 2)
             audio_values = torch.as_tensor(audios, dtype=torch.float32)
             audio_inputs = {
                 "audio_values": audio_values,
-                "audio_splits": torch.tensor([len(audios)], dtype=torch.int32),
+                # "audio_splits": torch.tensor([len(audios)], dtype=torch.int32),
                 "number_encoder_tokens": torch.tensor([number_encoder_tokens], dtype=torch.int32),
                 "audio_length": audios.shape[0] / audio_sample_rate
             }
         else:
             audio_inputs = {}
+            number_encoder_tokens = None
 
 
         # if audios is not None:
@@ -210,6 +213,7 @@ class Qwen2VLProcessor(ProcessorMixin):
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
 
         if number_encoder_tokens:
+            # import pdb; pdb.set_trace()
             for i in range(len(text)):
                 while self.audio_token in text[i]:
                     text[i] = text[i].replace(
