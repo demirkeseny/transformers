@@ -763,7 +763,7 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
                 use_cache=use_cache,
                 cache_position=cache_position,
             )
-
+        # import pdb; pdb.set_trace()
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -2080,7 +2080,7 @@ class WhisperAudioEncoder(nn.Module):
         for param in self.whisper_encoder.parameters():
             param.requires_grad = False
         # add an eval statement so that dropout, layernorm etc are in eval mode
-        self.whisper_encoder.eval()
+        # self.whisper_encoder.eval()
 
         # cache the of the shelf positional embedding length of 1500
         # self.register_buffer(
@@ -2161,7 +2161,7 @@ class WhisperAudioEncoder(nn.Module):
 
         return out
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def forward(self, audio_input: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -2184,7 +2184,9 @@ class WhisperAudioEncoder(nn.Module):
         enc_out = self.whisper_encoder(mel)  # BaseModelOutput(last_hidden_state: (B, 856, 1280)) where 856 is the number of input tokens.
 
         feats = enc_out.last_hidden_state            # (B, 856, 1280)
+        feats = feats.detach().requires_grad_(True)
         proj = self.audio_projection(feats)          # (B, 856, 8194) where 8194 is the output projection size.
+
         return proj
 
 class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, GenerationMixin):
@@ -2437,7 +2439,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "The audio contains speech saying: ..."
         ```"""
-
+        # import pdb; pdb.set_trace()
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -2545,6 +2547,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
+        # import pdb; pdb.set_trace()
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
@@ -2557,7 +2560,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
             return_dict=return_dict,
             cache_position=cache_position,
         )
-
+        # import pdb; pdb.set_trace()
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
 
